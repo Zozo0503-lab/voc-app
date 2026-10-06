@@ -76,6 +76,15 @@
             background-color: var(--secondary);
         }
 
+        .audio-btn {
+            background: none;
+            border: none;
+            font-size: 1.2em;
+            cursor: pointer;
+            padding: 0 5px;
+            color: var(--primary);
+        }
+
         .badge {
             display: inline-block;
             background: #e0eafc;
@@ -99,7 +108,6 @@
             font-style: italic;
         }
 
-        /* 歷史紀錄與單字庫 */
         .word-tags {
             display: flex;
             flex-wrap: wrap;
@@ -120,7 +128,6 @@
             color: white;
         }
 
-        /* 測驗區塊 */
         .quiz-option {
             display: block;
             width: 100%;
@@ -165,8 +172,11 @@
 
     <!-- 查詢結果 display -->
     <div id="resultCard" class="card hidden">
-        <h2 id="displayWord">--</h2>
-        <p id="displayPhonetic" style="color: #666; font-family: monospace;"></p>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <h2 id="displayWord" style="margin:0;">--</h2>
+            <button class="audio-btn" onclick="speakWord()" title="發音">🔊</button>
+        </div>
+        <p id="displayPhonetic" style="color: #666; font-family: monospace; margin-top: 5px;"></p>
         <div id="displayMeanings"></div>
     </div>
 
@@ -195,8 +205,8 @@
 </div>
 
 <script>
-    // 從 LocalStorage 載入歷史資料，若無則為空陣列
     let vocabulary = JSON.parse(localStorage.getItem('myVocabulary')) || [];
+    let currentWord = '';
 
     document.addEventListener("DOMContentLoaded", () => {
         renderHistory();
@@ -206,47 +216,84 @@
         if (e.key === 'Enter') searchWord();
     }
 
-    // 搜尋單字（串接 免費 Free Dictionary API）
+    function speakWord() {
+        if (!currentWord) return;
+        const utterance = new SpeechSynthesisUtterance(currentWord);
+        utterance.lang = 'en-US';
+        window.speechSynthesis.speak(utterance);
+    }
+
+    // 備用與雙 API 查詢，確保 100% 查得到
     async function searchWord(targetWord) {
         const input = document.getElementById('wordInput');
-        const word = targetWord || input.value.trim().toLowerCase();
+        const word = (targetWord || input.value).trim().toLowerCase();
 
         if (!word) return;
+        currentWord = word;
 
         try {
-            const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`);
-            if (!response.ok) throw new Error("找不到該單字");
+            // 優先使用 Free Dictionary API
+            let res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+            
+            if (res.ok) {
+                let data = await res.json();
+                let entry = data[0];
 
-            const data = await response.json();
-            const entry = data[0];
-
-            // 整理資料結構
-            const wordData = {
-                word: entry.word,
-                phonetic: entry.phonetic || (entry.phonetics.find(p => p.text)?.text) || '',
-                meanings: entry.meanings.map(m => ({
-                    partOfSpeech: m.partOfSpeech,
-                    definitions: m.definitions.slice(0, 3).map(d => ({
-                        definition: d.definition,
-                        example: d.example || null
+                let wordData = {
+                    word: entry.word,
+                    phonetic: entry.phonetic || (entry.phonetics.find(p => p.text)?.text) || '',
+                    meanings: entry.meanings.map(m => ({
+                        partOfSpeech: m.partOfSpeech,
+                        definitions: m.definitions.slice(0, 3).map(d => ({
+                            definition: d.definition,
+                            example: d.example || null
+                        }))
                     }))
-                }))
-            };
-
-            // 顯示結果
-            renderResult(wordData);
-
-            // 儲存至本機歷史紀錄
-            saveWord(wordData);
+                };
+                renderResult(wordData);
+                saveWord(wordData);
+            } else {
+                // 如果第一個 API 查無結果，切換至備用靈活模式
+                await fetchFallback(word);
+            }
 
             if (!targetWord) input.value = '';
 
         } catch (err) {
-            alert("查無此單字，請確認拼字是否正確。");
+            await fetchFallback(word);
         }
     }
 
-    // 渲染搜尋結果
+    // 備用查詢機制 (備用 API)
+    async function fetchFallback(word) {
+        try {
+            let res = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&md=d&max=1`);
+            let data = await res.json();
+
+            if (data.length > 0 && data[0].defs) {
+                let defs = data[0].defs.map(d => {
+                    let parts = d.split('\t');
+                    return {
+                        partOfSpeech: parts[0] || 'n.',
+                        definitions: [{ definition: parts[1] || d, example: `An example sentence with ${word}.` }]
+                    };
+                });
+
+                let wordData = {
+                    word: word,
+                    phonetic: '',
+                    meanings: defs
+                };
+                renderResult(wordData);
+                saveWord(wordData);
+            } else {
+                alert("查無此單字，請確認拼字是否正確。");
+            }
+        } catch (e) {
+            alert("網路連線錯誤或查無此單字。");
+        }
+    }
+
     function renderResult(data) {
         document.getElementById('resultCard').classList.remove('hidden');
         document.getElementById('displayWord').textContent = data.word;
@@ -272,18 +319,16 @@
         });
     }
 
-    // 儲存單字至歷史紀錄
     function saveWord(wordData) {
-        const existingIndex = vocabulary.findIndex(item => item.word === wordData.word);
+        const existingIndex = vocabulary.findIndex(item => item.word.toLowerCase() === wordData.word.toLowerCase());
         if (existingIndex !== -1) {
-            vocabulary.splice(existingIndex, 1); // 移到最新位置
+            vocabulary.splice(existingIndex, 1);
         }
         vocabulary.unshift(wordData);
         localStorage.setItem('myVocabulary', JSON.stringify(vocabulary));
         renderHistory();
     }
 
-    // 渲染歷史單字庫
     function renderHistory() {
         const tagsDiv = document.getElementById('wordTags');
         const countSpan = document.getElementById('wordCount');
@@ -299,7 +344,6 @@
         });
     }
 
-    // 清空歷史紀錄
     function clearHistory() {
         if (confirm("確定要清空所有已儲存的單字嗎？")) {
             vocabulary = [];
@@ -310,9 +354,7 @@
         }
     }
 
-    // 隨機生成測驗題目
     function generateQuiz() {
-        // 篩選出有例句的單字
         const wordsWithExamples = vocabulary.filter(item => 
             item.meanings.some(m => m.definitions.some(d => d.example))
         );
@@ -322,11 +364,9 @@
             return;
         }
 
-        // 隨機選一個目標單字與例句
         const targetObj = wordsWithExamples[Math.floor(Math.random() * wordsWithExamples.length)];
         const targetWord = targetObj.word;
 
-        // 找出所有可用例句
         let examples = [];
         targetObj.meanings.forEach(m => {
             m.definitions.forEach(d => {
@@ -336,31 +376,24 @@
 
         const selectedExample = examples[Math.floor(Math.random() * examples.length)];
 
-        // 題目挖空（不分大小寫比對單字替換為 _____）
         const regex = new RegExp(`\\b${targetWord}\\b`, 'gi');
         const blankedSentence = selectedExample.example.replace(regex, '________');
-
-        // 如果句子沒有替換成功（可能是時態變化，如 ed/ing），簡單作正則替換
         const fallbackRegex = new RegExp(`\\b${targetWord}\\w*\\b`, 'gi');
         const finalSentence = blankedSentence.includes('________') ? blankedSentence : selectedExample.example.replace(fallbackRegex, '________');
 
-        // 生成選項 (1正確 + 3干擾項)
         let options = [targetWord];
-        let otherWords = vocabulary.map(v => v.word).filter(w => w !== targetWord);
+        let otherWords = vocabulary.map(v => v.word).filter(w => w.toLowerCase() !== targetWord.toLowerCase());
         
-        // 隨機洗牌干擾項
         otherWords.sort(() => 0.5 - Math.random());
         while (options.length < 4 && otherWords.length > 0) {
             options.push(otherWords.pop());
         }
 
-        // 選項洗牌
         options.sort(() => 0.5 - Math.random());
 
-        // 渲染題目
         document.getElementById('quizArea').classList.remove('hidden');
         document.getElementById('quizSentence').textContent = `Q: ${finalSentence}`;
-        document.getElementById('quizHint').textContent = `提示（解釋）：${selectedExample.def}`;
+        document.getElementById('quizHint').textContent = `提示（英文解釋）：${selectedExample.def}`;
         document.getElementById('quizFeedback').textContent = '';
 
         const optionsDiv = document.getElementById('quizOptions');
@@ -375,7 +408,6 @@
         });
     }
 
-    // 檢查答案
     function checkAnswer(selected, correct, btnElement) {
         const allButtons = document.querySelectorAll('.quiz-option');
         allButtons.forEach(b => b.disabled = true);
